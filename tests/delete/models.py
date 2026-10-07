@@ -126,3 +126,31 @@ class Base(models.Model):
 
 class RelToBase(models.Model):
     base = models.ForeignKey(Base, models.DO_NOTHING)
+class DeferParent(models.Model):
+    name = models.CharField(max_length=20, default='')
+
+
+class DeferChild(models.Model):
+    parent = models.ForeignKey(DeferParent, models.CASCADE)
+    payload = models.TextField(default='')
+
+
+class DeferGrandChild(models.Model):
+    child = models.ForeignKey(DeferChild, models.CASCADE)
+
+
+class DeferNullChild(models.Model):
+    parent = models.ForeignKey(DeferParent, models.SET_NULL, null=True)
+    payload = models.TextField(default='')
+
+
+class DeferToFieldChild(models.Model):
+    parent = models.ForeignKey(DeferParent, models.CASCADE)
+    code = models.CharField(max_length=20, unique=True)
+    payload = models.TextField(default='')
+
+
+class DeferToFieldGrandChild(models.Model):
+    child = models.ForeignKey(
+        DeferToFieldChild, models.CASCADE, to_field='code'
+    )
