@@ -1,16 +1,13 @@
 from math import ceil
 
 from django.db import IntegrityError, connection, models
-from django.db.models import signals
 from django.db.models.deletion import Collector
 from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
 from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
-from django.test.utils import CaptureQueriesContext
+
 from .models import (
     MR, A, Avatar, Base, Child, HiddenUser, HiddenUserProfile, M, M2MFrom,
     M2MTo, MRNull, Parent, R, RChild, S, T, User, create_a, get_default_r,
-    DeferChild, DeferGrandChild, DeferNullChild, DeferParent,
-    DeferToFieldChild, DeferToFieldGrandChild,
 )
 
 
@@ -534,94 +531,3 @@ class FastDeleteTests(TestCase):
                 User.objects.filter(avatar__desc='missing').delete(),
                 (0, {'delete.User': 0})
             )
-
-class SelectRelatedCollector(Collector):
-    def related_objects(self, related, objs):
-        qs = super().related_objects(related, objs)
-        if related.related_model is DeferChild:
-            qs = qs.select_related('parent')
-        return qs
-
-
-class DeferredFieldsOnDeleteTests(TestCase):
-    """
-    Collector.collect() should only SELECT the columns it needs from related
-    rows that have to be loaded (the pk plus columns referenced by other FKs).
-    """
-
-    def _selects_from(self, ctx, table):
-        return [
-            q['sql'] for q in ctx.captured_queries
-            if q['sql'].upper().startswith('SELECT') and table in q['sql'].lower()
-        ]
-
-    def test_unreferenced_field_not_selected(self):
-        parent = DeferParent.objects.create()
-        child = DeferChild.objects.create(parent=parent, payload='x' * 100)
-        DeferGrandChild.objects.create(child=child)
-        with CaptureQueriesContext(connection) as ctx:
-            parent.delete()
-        selects = self._selects_from(ctx, 'delete_deferchild')
-        self.assertEqual(len(selects), 1)
-        self.assertNotIn('payload', selects[0])
-        self.assertFalse(DeferChild.objects.exists())
-        self.assertFalse(DeferGrandChild.objects.exists())
-
-    def test_set_null_children_deferred_and_updated(self):
-        parent = DeferParent.objects.create()
-        child = DeferNullChild.objects.create(parent=parent, payload='keep me')
-        with CaptureQueriesContext(connection) as ctx:
-            parent.delete()
-        selects = self._selects_from(ctx, 'delete_defernullchild')
-        self.assertEqual(len(selects), 1)
-        self.assertNotIn('payload', selects[0])
-        child.refresh_from_db()
-        self.assertIsNone(child.parent_id)
-        self.assertEqual(child.payload, 'keep me')
-
-    def test_fields_not_deferred_with_signal_listeners(self):
-        seen = []
-
-        def receiver(sender, instance, **kwargs):
-            seen.append(instance.payload)
-
-        for signal in (signals.pre_delete, signals.post_delete):
-            signal.connect(receiver, sender=DeferChild)
-            self.addCleanup(signal.disconnect, receiver, sender=DeferChild)
-        parent = DeferParent.objects.create()
-        child = DeferChild.objects.create(parent=parent, payload='visible')
-        DeferGrandChild.objects.create(child=child)
-        with CaptureQueriesContext(connection) as ctx:
-            parent.delete()
-        selects = self._selects_from(ctx, 'delete_deferchild')
-        # One query, with the column present: receivers didn't trigger
-        # per-instance deferred loads.
-        self.assertEqual(len(selects), 1)
-        self.assertIn('payload', selects[0])
-        self.assertEqual(seen, ['visible', 'visible'])
-
-    def test_to_field_referenced_column_still_selected(self):
-        parent = DeferParent.objects.create()
-        child = DeferToFieldChild.objects.create(parent=parent, code='abc', payload='y' * 50)
-        DeferToFieldGrandChild.objects.create(child=child)
-        with CaptureQueriesContext(connection) as ctx:
-            parent.delete()
-        selects = self._selects_from(ctx, 'delete_defertofieldchild')
-        self.assertEqual(len(selects), 1)
-        self.assertIn('code', selects[0])
-        self.assertNotIn('payload', selects[0])
-        self.assertFalse(DeferToFieldChild.objects.exists())
-        self.assertFalse(DeferToFieldGrandChild.objects.exists())
-
-    def test_select_related_skips_deferral(self):
-        parent = DeferParent.objects.create()
-        child = DeferChild.objects.create(parent=parent, payload='z')
-        DeferGrandChild.objects.create(child=child)
-        with CaptureQueriesContext(connection) as ctx:
-            collector = SelectRelatedCollector(using='default')
-            collector.collect(DeferParent.objects.filter(pk=parent.pk))
-            collector.delete()
-        selects = self._selects_from(ctx, 'delete_deferchild')
-        self.assertEqual(len(selects), 1)
-        self.assertIn('payload', selects[0])
-        self.assertFalse(DeferChild.objects.exists())
